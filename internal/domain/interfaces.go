@@ -56,6 +56,7 @@ type SessionRepository interface {
 	CreateSession(ctx context.Context, session *Session) error
 	GetSessionByToken(token string) (*Session, error)
 	GetSessionByUserID(ctx context.Context, userID string) (*Session, error)
+	UpdateSessionExpiry(ctx context.Context, sessionID string) error
 }
 
 type OrderRepository interface {

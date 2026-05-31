@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -18,7 +17,7 @@ import (
 
 	"go_project/internal/config"
 	"go_project/internal/handler"
-	appjwt "go_project/internal/jwt"
+	"go_project/internal/middleware"
 	"go_project/internal/repository/postgres"
 	"go_project/internal/usecase"
 )
@@ -37,32 +36,6 @@ func connectPostgres(dsn string, attempts int, delay time.Duration) (*sqlx.DB, e
 		}
 	}
 	return nil, fmt.Errorf("after %d attempts: %w", attempts, lastErr)
-}
-
-func withAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "missing authorization header", http.StatusUnauthorized)
-			return
-		}
-
-		const bearerPrefix = "Bearer "
-		if !strings.HasPrefix(authHeader, bearerPrefix) {
-			http.Error(w, "invalid authorization header", http.StatusUnauthorized)
-			return
-		}
-
-		tokenString := strings.TrimPrefix(authHeader, bearerPrefix)
-		claims, err := appjwt.ValidateToken(tokenString)
-		if err != nil {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		ctx := context.WithValue(r.Context(), "userID", claims.UserID)
-		next(w, r.WithContext(ctx))
-	}
 }
 
 func main() {
@@ -97,12 +70,13 @@ func main() {
 	userH := handler.NewUserHandler(userUC)
 	orderH := handler.NewOrderHandler(orderUC)
 	testH := handler.NewTestHandler(testUC)
+	middlewareManager := middleware.NewMiddlewareManager(slog.Default(), sessionRepo)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /auth/register", userH.RegisterUser())
 	mux.Handle("POST /auth/login", userH.LoginUser())
-	mux.Handle("POST /orders/create", withAuth(orderH.AddNewOrder()))
-	mux.Handle("GET /orders/list", withAuth(orderH.GetOrdersList()))
+	mux.Handle("POST /orders/create", middlewareManager.JWTMiddleware(middlewareManager.SessionMiddleware(orderH.AddNewOrder())))
+	mux.Handle("GET /orders/list", middlewareManager.JWTMiddleware(middlewareManager.SessionMiddleware(orderH.GetOrdersList())))
 	mux.HandleFunc("/register", userH.Register)
 	mux.HandleFunc("/test", testH.Test())
 	mux.HandleFunc("/dbtest", testH.DbTest())

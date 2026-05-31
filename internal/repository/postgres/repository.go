@@ -121,6 +121,11 @@ func (r *sessionRepo) GetSessionByUserID(ctx context.Context, userID string) (*d
 	return &s, nil
 }
 
+func (r *sessionRepo) UpdateSessionExpiry(ctx context.Context, sessionID string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE sessions SET expires_at = NOW() + INTERVAL '24 hours' WHERE session_id = $1`, sessionID)
+	return err
+}
+
 type orderRepo struct {
 	db *sqlx.DB
 }
