@@ -3,24 +3,26 @@ package domain
 import (
 	"context"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type User struct {
-	ID        string    `db:"id"`
-	Login     string    `db:"login"`
-	Password  string    `db:"password"`
-	Email     string    `db:"email"`
-	Phone     string    `db:"phone"`
-	IsActive  bool      `db:"is_active"`
-	CreatedAt time.Time `db:"created_at"`
-	UpdatedAt time.Time `db:"updated_at"`
+	ID        string    `json:"id,omitempty" db:"id"`
+	Login     string    `json:"login" db:"login"`
+	Password  string    `json:"-" db:"password"`
+	Email     string    `json:"email,omitempty" db:"email"`
+	Phone     string    `json:"phone,omitempty" db:"phone"`
+	IsActive  bool      `json:"is_active,omitempty" db:"is_active"`
+	CreatedAt time.Time `json:"created_at,omitempty" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at,omitempty" db:"updated_at"`
 }
 
 type Session struct {
-	SessionID string    `db:"session_id"`
-	UserID    string    `db:"user_id"`
-	CreatedAt time.Time `db:"created_at"`
-	ExpiresAt time.Time `db:"expires_at"`
+	SessionID string    `json:"sessionID" db:"session_id"`
+	UserID    string    `json:"userID" db:"user_id"`
+	CreatedAt time.Time `json:"createdAt" db:"created_at"`
+	ExpiresAt time.Time `json:"expiresAt" db:"expires_at"`
 }
 
 type Order struct {
@@ -32,25 +34,34 @@ type Order struct {
 	UpdatedAt   time.Time  `db:"updated_at"`
 }
 
-type OrderItem struct {
-	Price    float64
-	Quantity int
+type NewOrderData struct {
+	UserID string `db:"user_id" json:"-" validate:"required"`
+	Amount int    `db:"amount" json:"amount" validate:"required,min=1"`
+}
+
+type OrderInfo struct {
+	ID        string    `db:"id" json:"orderID"`
+	Status    string    `db:"status" json:"status"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
 }
 
 type UserRepository interface {
 	CreateUser(user *User) error
 	GetUserByID(id string) (*User, error)
 	GetUserByEmail(email string) (*User, error)
+	GetUserByLogin(ctx context.Context, login string) (*User, error)
 }
 
 type SessionRepository interface {
-	CreateSession(session *Session) error
+	CreateSession(ctx context.Context, session *Session) error
 	GetSessionByToken(token string) (*Session, error)
+	GetSessionByUserID(ctx context.Context, userID string) (*Session, error)
 }
 
 type OrderRepository interface {
-	CreateOrder(order *Order) error
-	GetOrdersByUserID(userID string) ([]Order, error)
+	CreateOrder(ctx context.Context, userID string) (uuid.UUID, error)
+	GetOrdersForUser(ctx context.Context, userID string, isActive bool) ([]*OrderInfo, error)
+	PublishNewOrder(orderID string) error
 }
 
 type TestRepository interface {
@@ -59,13 +70,14 @@ type TestRepository interface {
 }
 
 type UserUsecase interface {
-	Register(name, email, password string) (*User, error)
-	Login(email, password string) (*Session, error)
+	RegisterUser(ctx context.Context, login, password string) (*User, error)
+	GetUserByLogin(ctx context.Context, login string) (*User, error)
+	CreateSession(ctx context.Context, sessionID, userID string) error
 }
 
 type OrderUsecase interface {
-	PlaceOrder(userID string, items []OrderItem) (*Order, error)
-	GetOrders(userID string) ([]Order, error)
+	CreateOrder(ctx context.Context, userID string) (uuid.UUID, error)
+	GetOrders(ctx context.Context, userID string, isActive bool) ([]*OrderInfo, error)
 }
 
 type TestUsecase interface {

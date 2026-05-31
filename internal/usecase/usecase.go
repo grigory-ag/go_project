@@ -2,11 +2,12 @@ package usecase
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
-	"time"
+	"log/slog"
 
 	"go_project/internal/domain"
+
+	"github.com/google/uuid"
 )
 
 type userUsecase struct {
@@ -18,59 +19,73 @@ func NewUserUsecase(ur domain.UserRepository, sr domain.SessionRepository) domai
 	return &userUsecase{userRepo: ur, sessionRepo: sr}
 }
 
-func (u *userUsecase) Register(name, email, password string) (*domain.User, error) {
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
-	user := &domain.User{
-		Login:    name,
-		Email:    email,
-		Password: hash,
-		Phone:    "",
-		IsActive: true,
-	}
-	err := u.userRepo.CreateUser(user)
-	return user, err
-}
-
-func (u *userUsecase) Login(email, password string) (*domain.Session, error) {
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
-	user, err := u.userRepo.GetUserByEmail(email)
+func (u *userUsecase) RegisterUser(ctx context.Context, login, password string) (*domain.User, error) {
+	existing, err := u.userRepo.GetUserByLogin(ctx, login)
 	if err != nil {
 		return nil, err
 	}
-	if user == nil || user.Password != hash {
-		return nil, fmt.Errorf("invalid credentials")
+	if existing != nil {
+		return nil, fmt.Errorf("user with login %s already exists", login)
 	}
-	token := fmt.Sprintf("%x", sha256.Sum256([]byte(email)))
+
+	user := &domain.User{
+		Login:    login,
+		Password: password,
+		Phone:    "",
+		IsActive: true,
+	}
+
+	if err := u.userRepo.CreateUser(user); err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
+func (u *userUsecase) GetUserByLogin(ctx context.Context, login string) (*domain.User, error) {
+	return u.userRepo.GetUserByLogin(ctx, login)
+}
+
+func (u *userUsecase) CreateSession(ctx context.Context, sessionID, userID string) error {
 	session := &domain.Session{
-		SessionID: token,
-		UserID:    user.ID,
-		ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+		SessionID: sessionID,
+		UserID:    userID,
 	}
-	err = u.sessionRepo.CreateSession(session)
-	return session, err
+	return u.sessionRepo.CreateSession(ctx, session)
 }
 
 type orderUsecase struct {
 	orderRepo domain.OrderRepository
+	log       *slog.Logger
 }
 
 func NewOrderUsecase(or domain.OrderRepository) domain.OrderUsecase {
-	return &orderUsecase{orderRepo: or}
+	return &orderUsecase{orderRepo: or, log: slog.Default()}
 }
 
-func (o *orderUsecase) PlaceOrder(userID string, items []domain.OrderItem) (*domain.Order, error) {
-	var total float64
-	for _, item := range items {
-		total += item.Price * float64(item.Quantity)
+func (o *orderUsecase) CreateOrder(ctx context.Context, userID string) (uuid.UUID, error) {
+	orderID, err := o.orderRepo.CreateOrder(ctx, userID)
+	if err != nil {
+		o.log.Error("Failed to create order", slog.Any("error", err))
+		return uuid.UUID{}, err
 	}
-	_ = total
-	order := &domain.Order{UserID: userID, Status: "pending"}
-	err := o.orderRepo.CreateOrder(order)
-	return order, err
+
+	if err := o.orderRepo.PublishNewOrder(orderID.String()); err != nil {
+		o.log.Error("Failed to publish new order", slog.Any("error", err))
+		return uuid.UUID{}, err
+	}
+
+	return orderID, nil
 }
 
-func (o *orderUsecase) GetOrders(userID string) ([]domain.Order, error) {
-	return o.orderRepo.GetOrdersByUserID(userID)
+func (o *orderUsecase) GetOrders(ctx context.Context, userID string, isActive bool) ([]*domain.OrderInfo, error) {
+	orders, err := o.orderRepo.GetOrdersForUser(ctx, userID, isActive)
+	if err != nil {
+		o.log.Error("Failed to get orders for user", slog.Any("userID", userID), slog.Any("error", err))
+		return nil, err
+	}
+
+	return orders, nil
 }
 
 type testUsecase struct {

@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,12 +18,55 @@ import (
 
 	"go_project/internal/config"
 	"go_project/internal/handler"
+	appjwt "go_project/internal/jwt"
 	"go_project/internal/repository/postgres"
 	"go_project/internal/usecase"
 )
 
+func connectPostgres(dsn string, attempts int, delay time.Duration) (*sqlx.DB, error) {
+	var lastErr error
+	for i := 1; i <= attempts; i++ {
+		db, err := sqlx.Connect("postgres", dsn)
+		if err == nil {
+			return db, nil
+		}
+		lastErr = err
+		if i < attempts {
+			slog.Warn("database not ready, retrying", "attempt", i, "max", attempts, "err", err)
+			time.Sleep(delay)
+		}
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", attempts, lastErr)
+}
+
+func withAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "missing authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authHeader, bearerPrefix) {
+			http.Error(w, "invalid authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, bearerPrefix)
+		claims, err := appjwt.ValidateToken(tokenString)
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), "userID", claims.UserID)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 func main() {
-	if err := godotenv.Load(); err != nil {
+	if err := godotenv.Overload(); err != nil {
 		log.Fatal(err)
 	}
 
@@ -33,7 +78,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	db, err := sqlx.Connect("postgres", cfg.DB.DSN())
+	db, err := connectPostgres(cfg.DB.DSN(), 30, 500*time.Millisecond)
 	if err != nil {
 		slog.Error("db connect error", "err", err)
 		os.Exit(1)
@@ -50,10 +95,14 @@ func main() {
 	testUC := usecase.NewTestUsecase(testRepo)
 
 	userH := handler.NewUserHandler(userUC)
+	orderH := handler.NewOrderHandler(orderUC)
 	testH := handler.NewTestHandler(testUC)
-	_ = orderUC
 
 	mux := http.NewServeMux()
+	mux.Handle("POST /auth/register", userH.RegisterUser())
+	mux.Handle("POST /auth/login", userH.LoginUser())
+	mux.Handle("POST /orders/create", withAuth(orderH.AddNewOrder()))
+	mux.Handle("GET /orders/list", withAuth(orderH.GetOrdersList()))
 	mux.HandleFunc("/register", userH.Register)
 	mux.HandleFunc("/test", testH.Test())
 	mux.HandleFunc("/dbtest", testH.DbTest())
