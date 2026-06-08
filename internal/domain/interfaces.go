@@ -45,6 +45,11 @@ type OrderInfo struct {
 	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
 }
 
+type ChangeOrderStatusData struct {
+	OrderID   string `json:"orderID"`
+	NewStatus string `json:"newStatus"`
+}
+
 type UserRepository interface {
 	CreateUser(user *User) error
 	GetUserByID(id string) (*User, error)
@@ -63,6 +68,8 @@ type OrderRepository interface {
 	CreateOrder(ctx context.Context, userID string) (uuid.UUID, error)
 	GetOrdersForUser(ctx context.Context, userID string, isActive bool) ([]*OrderInfo, error)
 	PublishNewOrder(orderID string) error
+	StartStatusChangeConsumer(queueName string)
+	ChangeOrderStatus(ctx context.Context, statusData *ChangeOrderStatusData) error
 }
 
 type TestRepository interface {

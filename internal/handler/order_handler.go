@@ -25,8 +25,8 @@ var validate = validator.New()
 
 const CtxTimeout = 5 * time.Second
 
-func NewOrderHandler(uc domain.OrderUsecase) *OrderHandler {
-	return &OrderHandler{uc: uc, log: slog.Default()}
+func NewOrderHandler(uc domain.OrderUsecase, log *slog.Logger) *OrderHandler {
+	return &OrderHandler{uc: uc, log: log}
 }
 
 func (h *OrderHandler) AddNewOrder() http.HandlerFunc {
@@ -84,6 +84,11 @@ func (h *OrderHandler) AddNewOrder() http.HandlerFunc {
 		}
 
 		utils.WriteJSONResponse(w, http.StatusOK, orderIDs, h.log)
+		h.log.Info(
+			"orders created successfully",
+			slog.String("user_id", userID),
+			slog.Int("amount", len(orderIDs)),
+		)
 	}
 }
 
@@ -122,5 +127,11 @@ func (h *OrderHandler) GetOrdersList() http.HandlerFunc {
 		}
 
 		utils.WriteJSONResponse(w, http.StatusOK, map[string]interface{}{"count": len(orders), "items": orders}, h.log)
+		h.log.Info(
+			"orders list returned",
+			slog.String("user_id", userID),
+			slog.Int("count", len(orders)),
+			slog.Bool("active_only", isActive),
+		)
 	}
 }

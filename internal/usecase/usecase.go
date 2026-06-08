@@ -59,8 +59,8 @@ type orderUsecase struct {
 	log       *slog.Logger
 }
 
-func NewOrderUsecase(or domain.OrderRepository) domain.OrderUsecase {
-	return &orderUsecase{orderRepo: or, log: slog.Default()}
+func NewOrderUsecase(or domain.OrderRepository, log *slog.Logger) domain.OrderUsecase {
+	return &orderUsecase{orderRepo: or, log: log}
 }
 
 func (o *orderUsecase) CreateOrder(ctx context.Context, userID string) (uuid.UUID, error) {

@@ -3,10 +3,13 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"go_project/internal/domain"
+	"go_project/internal/rabbitmq"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -127,11 +130,13 @@ func (r *sessionRepo) UpdateSessionExpiry(ctx context.Context, sessionID string)
 }
 
 type orderRepo struct {
-	db *sqlx.DB
+	db     *sqlx.DB
+	rabbit *rabbitmq.RabbitMQ
+	log    *slog.Logger
 }
 
-func NewOrderRepo(db *sqlx.DB) domain.OrderRepository {
-	return &orderRepo{db: db}
+func NewOrderRepo(db *sqlx.DB, rabbit *rabbitmq.RabbitMQ, log *slog.Logger) domain.OrderRepository {
+	return &orderRepo{db: db, rabbit: rabbit, log: log}
 }
 
 func (r *orderRepo) CreateOrder(ctx context.Context, userID string) (uuid.UUID, error) {
@@ -174,6 +179,113 @@ func (r *orderRepo) GetOrdersForUser(ctx context.Context, userID string, isActiv
 }
 
 func (r *orderRepo) PublishNewOrder(orderID string) error {
+	body, err := json.Marshal(orderID)
+	if err != nil {
+		return fmt.Errorf("failed to marshal new order: %w", err)
+	}
+
+	if err := r.rabbit.Publish(rabbitmq.NewOrdersRoutingKey, body); err != nil {
+		r.log.Error("failed to publish new order", slog.String("order_id", orderID), slog.Any("error", err))
+		return err
+	}
+
+	r.log.Info("new order published", slog.String("order_id", orderID))
+	return nil
+}
+
+func (r *orderRepo) StartStatusChangeConsumer(queueName string) {
+	msgs, err := r.rabbit.Channel.Consume(
+		queueName,
+		"",
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		r.log.Error("failed to start order status consumer", slog.Any("error", err))
+		return
+	}
+
+	go func() {
+		r.log.Info("order status consumer started", slog.String("queue", queueName))
+		for {
+			select {
+			case <-r.rabbit.Ctx.Done():
+				r.log.Info("order status consumer stopped")
+				return
+			case delivery, ok := <-msgs:
+				if !ok {
+					r.log.Error("order status RabbitMQ channel closed")
+					return
+				}
+
+				var statusData domain.ChangeOrderStatusData
+				if err := json.Unmarshal(delivery.Body, &statusData); err != nil {
+					r.log.Error("failed to parse order status message", slog.Any("error", err))
+					_ = delivery.Nack(false, true)
+					continue
+				}
+
+				if err := r.ChangeOrderStatus(r.rabbit.Ctx, &statusData); err != nil {
+					r.log.Error(
+						"failed to update order status",
+						slog.String("order_id", statusData.OrderID),
+						slog.String("status", statusData.NewStatus),
+						slog.Any("error", err),
+					)
+					_ = delivery.Nack(false, true)
+					continue
+				}
+
+				if err := delivery.Ack(false); err != nil {
+					r.log.Error("failed to acknowledge order status message", slog.Any("error", err))
+					continue
+				}
+
+				r.log.Info(
+					"order status updated",
+					slog.String("order_id", statusData.OrderID),
+					slog.String("status", statusData.NewStatus),
+				)
+			}
+		}
+	}()
+}
+
+func (r *orderRepo) ChangeOrderStatus(ctx context.Context, statusData *domain.ChangeOrderStatusData) error {
+	switch statusData.NewStatus {
+	case "UNDEFINED", "PACKING", "ARRIVING", "COMPLETED", "CANCELED":
+	default:
+		return fmt.Errorf("unsupported order status %q", statusData.NewStatus)
+	}
+
+	result, err := r.db.ExecContext(
+		ctx,
+		`UPDATE orders
+		 SET status = CAST($2 AS VARCHAR(20)),
+		     updated_at = NOW(),
+		     completed_at = CASE
+		         WHEN CAST($2 AS VARCHAR(20)) = 'COMPLETED' THEN NOW()
+		         ELSE completed_at
+		     END
+		 WHERE id = $1`,
+		statusData.OrderID,
+		statusData.NewStatus,
+	)
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("order %s not found", statusData.OrderID)
+	}
+
 	return nil
 }
 

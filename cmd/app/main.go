@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,10 +13,14 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"go_project/internal/config"
 	"go_project/internal/handler"
+	appmetrics "go_project/internal/metrics"
 	"go_project/internal/middleware"
+	"go_project/internal/rabbitmq"
 	"go_project/internal/repository/postgres"
 	"go_project/internal/usecase"
 )
@@ -39,38 +42,51 @@ func connectPostgres(dsn string, attempts int, delay time.Duration) (*sqlx.DB, e
 }
 
 func main() {
-	if err := godotenv.Overload(); err != nil {
-		log.Fatal(err)
-	}
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(log)
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	if err := godotenv.Overload(); err != nil {
+		log.Warn("no .env file found or error loading; using environment variables", slog.Any("error", err))
+	}
 
 	cfg, err := config.New()
 	if err != nil {
-		slog.Error("config error", "err", err)
+		log.Error("config error", slog.Any("error", err))
 		os.Exit(1)
 	}
 
 	db, err := connectPostgres(cfg.DB.DSN(), 30, 500*time.Millisecond)
 	if err != nil {
-		slog.Error("db connect error", "err", err)
+		log.Error("db connect error", slog.Any("error", err))
 		os.Exit(1)
 	}
 	defer db.Close()
 
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+
+	rabbit, err := rabbitmq.NewRabbitMQ(&cfg.RabbitMQ, appCtx, log)
+	if err != nil {
+		log.Error("rabbitmq connect error", slog.Any("error", err))
+		os.Exit(1)
+	}
+	defer rabbit.Close()
+
 	userRepo := postgres.NewUserRepo(db)
 	sessionRepo := postgres.NewSessionRepo(db)
-	orderRepo := postgres.NewOrderRepo(db)
+	orderRepo := postgres.NewOrderRepo(db, rabbit, log)
 	testRepo := postgres.NewTestRepo(db)
+	orderRepo.StartStatusChangeConsumer(rabbitmq.OrderStatusQueue)
 
 	userUC := usecase.NewUserUsecase(userRepo, sessionRepo)
-	orderUC := usecase.NewOrderUsecase(orderRepo)
+	orderUC := usecase.NewOrderUsecase(orderRepo, log)
 	testUC := usecase.NewTestUsecase(testRepo)
 
-	userH := handler.NewUserHandler(userUC)
-	orderH := handler.NewOrderHandler(orderUC)
-	testH := handler.NewTestHandler(testUC)
-	middlewareManager := middleware.NewMiddlewareManager(slog.Default(), sessionRepo)
+	userH := handler.NewUserHandler(userUC, log)
+	orderH := handler.NewOrderHandler(orderUC, log)
+	testH := handler.NewTestHandler(testUC, log)
+	middlewareManager := middleware.NewMiddlewareManager(log, sessionRepo)
+	serverMetrics := appmetrics.NewServerMetrics(prometheus.DefaultRegisterer)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /auth/register", userH.RegisterUser())
@@ -80,32 +96,34 @@ func main() {
 	mux.HandleFunc("/register", userH.Register)
 	mux.HandleFunc("/test", testH.Test())
 	mux.HandleFunc("/dbtest", testH.DbTest())
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Server.Port,
-		Handler: mux,
+		Handler: serverMetrics.Middleware(mux),
 	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		slog.Info("server started", "port", cfg.Server.Port)
+		log.Info("server started", slog.String("port", cfg.Server.Port))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server error", "err", err)
+			log.Error("server error", slog.Any("error", err))
 			os.Exit(1)
 		}
 	}()
 
 	<-quit
-	slog.Info("shutting down server")
+	log.Info("shutting down server")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("shutdown error", "err", err)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("shutdown error", slog.Any("error", err))
 		os.Exit(1)
 	}
-	slog.Info("server stopped gracefully")
+	appCancel()
+	log.Info("server stopped gracefully")
 }
